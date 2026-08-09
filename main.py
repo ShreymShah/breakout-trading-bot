@@ -10,13 +10,13 @@ import websockets.exceptions
 from tastytrade import DXLinkStreamer
 from tastytrade.dxfeed import Candle
 
-from platinum_bot.api_client import TastyTradeClient
-from platinum_bot.config import Settings, load_settings
-from platinum_bot.data_handler import DataHandler
-from platinum_bot.notifications import TelegramNotifier
-from platinum_bot.risk_management import RiskManager
-from platinum_bot.state import ActiveTrade, BotState, StateManager
-from platinum_bot.strategy import BreakoutStrategy
+from breakout_bot.api_client import TastyTradeClient
+from breakout_bot.config import Settings, load_settings
+from breakout_bot.data_handler import DataHandler
+from breakout_bot.notifications import TelegramNotifier
+from breakout_bot.risk_management import RiskManager
+from breakout_bot.state import ActiveTrade, BotState, StateManager
+from breakout_bot.strategy import BreakoutStrategy
 
 logger = logging.getLogger(__name__)
 
@@ -450,7 +450,7 @@ class TradingBot:
 
 def main() -> None:
     configure_logging()
-    logger.info("Starting Platinum Trading Bot")
+    logger.info("Starting Breakout Trading Bot")
     settings = load_settings()
     bot = TradingBot(settings)
     asyncio.run(bot.start())

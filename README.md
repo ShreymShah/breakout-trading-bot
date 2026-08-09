@@ -13,7 +13,7 @@ Automated futures trading bot for TastyTrade that monitors any futures contract 
 
 ```
 main.py                  TradingBot orchestrator + entry point
-platinum_bot/
+breakout_bot/
   config.py              Settings dataclass, env loading, session definitions
   api_client.py          TastyTrade auth, bracket orders, quotes
   strategy.py            Pure signal logic: breakout entry/exit detection
@@ -51,7 +51,7 @@ All credentials are loaded from environment variables (`.env` file):
 | `TELEGRAM_CHAT_ID` | Telegram chat ID for notifications |
 | `SYMBOL_BASE` | Futures symbol (e.g., `/MNQ`, `/MES`, `/MHGH6`) |
 
-Session parameters (reference hour, start/end, target/stop) are defined in `platinum_bot/config.py`.
+Session parameters (reference hour, start/end, target/stop) are defined in `breakout_bot/config.py`.
 
 ## State Persistence
 

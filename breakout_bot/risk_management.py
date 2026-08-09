@@ -1,8 +1,8 @@
 from datetime import datetime
 from typing import Dict, Optional
 
-from platinum_bot.config import SessionConfig
-from platinum_bot.state import SessionTradeState
+from breakout_bot.config import SessionConfig
+from breakout_bot.state import SessionTradeState
 
 
 class RiskManager:

@@ -2,7 +2,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Optional
 
-from platinum_bot.state import ActiveTrade
+from breakout_bot.state import ActiveTrade
 
 
 @dataclass
@@ -19,7 +19,7 @@ class ExitSignal:
 
 
 class BreakoutStrategy:
-    """Pure signal logic for platinum breakout entries and exits."""
+    """Pure signal logic for breakout entries and exits."""
 
     @staticmethod
     def check_entry_signal(
