@@ -50,8 +50,9 @@ All credentials are loaded from environment variables (`.env` file):
 | `TELEGRAM_TOKEN` | Telegram bot API token |
 | `TELEGRAM_CHAT_ID` | Telegram chat ID for notifications |
 | `SYMBOL_BASE` | Futures symbol (e.g., `/MNQ`, `/MES`, `/MHGH6`) |
+| `SESSIONS_JSON` | Optional. JSON object defining one or more trading sessions (see `.env.example`). Defaults to a single session if unset. |
 
-Session parameters (reference hour, start/end, target/stop) are defined in `breakout_bot/config.py`.
+Each session needs: `name`, `ref_hour` (hour whose candle sets the breakout levels), `start_hour`/`end_hour` (active trading window), `target_points`, `stop_points`. Multiple sessions can run per day, each independently tracking its own reference levels and trade count.
 
 ## State Persistence
 
