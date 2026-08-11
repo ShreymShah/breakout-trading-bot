@@ -36,7 +36,7 @@ class TradingBot:
     def __init__(self, settings: Settings):
         self._settings = settings
         self._tz = pytz.timezone(settings.timezone)
-        self._client = TastyTradeClient()
+        self._client = TastyTradeClient(live=settings.live_trading)
         self._notifier = TelegramNotifier(
             settings.telegram_token, settings.telegram_chat_id
         )
@@ -223,6 +223,7 @@ class TradingBot:
                 buy=(signal.side == "LONG"),
                 target_points=Decimal(str(cfg.target_points)),
                 stop_points=Decimal(str(cfg.stop_points)),
+                dry_run_price=signal.price,
             )
 
             if "error" in trade_result:
@@ -256,13 +257,16 @@ class TradingBot:
             self._state_mgr.save(self._state)
 
             trade_num = self._state.trades_taken[s_id].count
+            mode_tag = "" if self._settings.live_trading else " _(DRY-RUN)_"
             self._notifier.send(
-                f"*{signal.side} #{trade_num}* ({cfg.name})\n"
+                f"*{signal.side} #{trade_num}* ({cfg.name}){mode_tag}\n"
                 f"Entry: `{signal.price}` | TP: `{tp}` | SL: `{sl}`"
                 f"\n**Recent Quotes:**{quote_block}"
             )
             logger.info(
-                "Trade entered: %s %s #%d", cfg.name, signal.side, trade_num
+                "Trade entered: %s %s #%d (%s)",
+                cfg.name, signal.side, trade_num,
+                "LIVE" if self._settings.live_trading else "DRY-RUN",
             )
 
         return in_active_window
@@ -409,6 +413,17 @@ class TradingBot:
 
     async def start(self) -> None:
         """Top-level restart loop with exponential backoff."""
+        if self._settings.live_trading:
+            logger.info("LIVE TRADING ENABLED - real orders will be placed")
+            self._notifier.send(
+                "*LIVE TRADING ENABLED*\nReal MARKET entries + OCO brackets will be placed."
+            )
+        else:
+            logger.info(
+                "DRY-RUN mode - no broker orders will be placed "
+                "(set LIVE_TRADING=1 to go live)"
+            )
+
         consecutive_errors = 0
         max_consecutive_errors = 10
 

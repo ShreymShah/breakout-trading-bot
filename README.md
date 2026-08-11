@@ -9,6 +9,8 @@ Automated futures trading bot for TastyTrade that monitors any futures contract 
 3. On breakout, it places a market entry with an OCO bracket (limit target + stop loss)
 4. Each session allows up to 2 trades, one per direction
 
+By default the bot runs in **dry-run mode**: signals are detected against live market data and simulated as if filled at the breakout price, but no broker orders are ever placed. Set `LIVE_TRADING=1` to place real orders.
+
 ## Architecture
 
 ```
@@ -51,6 +53,7 @@ All credentials are loaded from environment variables (`.env` file):
 | `TELEGRAM_CHAT_ID` | Telegram chat ID for notifications |
 | `SYMBOL_BASE` | Futures symbol (e.g., `/MNQ`, `/MES`, `/MHGH6`) |
 | `SESSIONS_JSON` | Optional. JSON object defining one or more trading sessions (see `.env.example`). Defaults to a single session if unset. |
+| `LIVE_TRADING` | Optional. `1`/`true`/`yes`/`on` to place real orders. Defaults to off (dry-run). |
 
 Each session needs: `name`, `ref_hour` (hour whose candle sets the breakout levels), `start_hour`/`end_hour` (active trading window), `target_points`, `stop_points`. Multiple sessions can run per day, each independently tracking its own reference levels and trade count.
 

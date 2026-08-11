@@ -27,6 +27,7 @@ class Settings:
     entry_delay_minutes: int = 5
     max_idle_seconds: int = 300
     timezone: str = "America/Los_Angeles"
+    live_trading: bool = False
 
 
 # Default session set, used when SESSIONS_JSON is not set. Session keys are
@@ -91,6 +92,13 @@ def load_settings() -> Settings:
     """Load settings from environment variables."""
     load_dotenv()
 
+    # LIVE_TRADING is OFF by default: no broker orders are placed and trades
+    # are simulated from candle closes. Set LIVE_TRADING=1 to place real
+    # orders. Accepts 1/true/yes/on (case-insensitive).
+    live_trading = os.environ.get("LIVE_TRADING", "0").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+
     return Settings(
         tt_username=os.environ["TT_USERNAME"],
         tt_password=os.environ["TT_PASSWORD"],
@@ -98,4 +106,5 @@ def load_settings() -> Settings:
         telegram_chat_id=os.environ["TELEGRAM_CHAT_ID"],
         symbol_base=os.environ.get("SYMBOL_BASE", "/MES"),
         sessions=_load_sessions(),
+        live_trading=live_trading,
     )

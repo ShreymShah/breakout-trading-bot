@@ -20,9 +20,15 @@ logger = logging.getLogger(__name__)
 
 
 class TastyTradeClient:
-    """Handles TastyTrade authentication, order placement, and quote retrieval."""
+    """Handles TastyTrade authentication, order placement, and quote retrieval.
 
-    def __init__(self):
+    When `live` is False (dry-run), no broker orders are ever placed —
+    place_bracket_order simulates an immediate fill at the given signal price
+    instead. This lets the bot run signal-only against real market data.
+    """
+
+    def __init__(self, live: bool = False):
+        self.live = live
         self.session: Optional[Session] = None
         self.account: Optional[Account] = None
         self.streamer_symbol: Optional[str] = None
@@ -34,8 +40,23 @@ class TastyTradeClient:
                 self.session = Session(username, password)
                 future = Future.get(self.session, [symbol_base])[0]
                 self.streamer_symbol = future.streamer_symbol
-                self.account = Account.get(self.session)[1]
-                logger.info("Login successful - %s", self.streamer_symbol)
+                # Account is only needed to place real orders. In dry-run,
+                # tolerate a missing/inaccessible account so the bot can still
+                # run signal-only against market data.
+                try:
+                    self.account = Account.get(self.session)[1]
+                except Exception as acct_err:
+                    if self.live:
+                        raise
+                    self.account = None
+                    logger.warning(
+                        "Account fetch failed (dry-run, continuing): %s", acct_err
+                    )
+                logger.info(
+                    "Login successful - %s (mode=%s)",
+                    self.streamer_symbol,
+                    "LIVE" if self.live else "DRY-RUN",
+                )
                 return
             except Exception as e:
                 logger.warning(
@@ -75,8 +96,16 @@ class TastyTradeClient:
         target_points: Decimal,
         stop_points: Decimal,
         entry_price: Optional[Decimal] = None,
+        dry_run_price: Optional[Decimal] = None,
     ) -> Dict:
-        """Places a market/limit entry, polls for fill, then places OCO brackets."""
+        """Places a market/limit entry, polls for fill, then places OCO brackets.
+
+        In dry-run mode (self.live is False), places no broker orders and
+        instead simulates an immediate fill at `dry_run_price`.
+        """
+        if not self.live:
+            return self._simulate_bracket(buy, target_points, stop_points, dry_run_price)
+
         entry_action = OrderAction.BUY if buy else OrderAction.SELL
         entry_leg = Leg(
             instrument_type=InstrumentType.FUTURE,
@@ -148,6 +177,30 @@ class TastyTradeClient:
             "entry_order_id": order_id,
             "fill_price": fill_price,
             "complex_order_id": oco_response.complex_order.id,
+            "target_price": target_price,
+            "stop_price": stop_price,
+        }
+
+    @staticmethod
+    def _simulate_bracket(
+        buy: bool,
+        target_points: Decimal,
+        stop_points: Decimal,
+        dry_run_price: Optional[Decimal],
+    ) -> Dict:
+        """Dry-run stand-in for place_bracket_order: no broker calls, fills
+        immediately at dry_run_price."""
+        if dry_run_price is None:
+            return {"error": "dry-run simulation requires dry_run_price"}
+        fill_price = dry_run_price
+        target_price = (
+            fill_price + target_points if buy else fill_price - target_points
+        )
+        stop_price = fill_price - stop_points if buy else fill_price + stop_points
+        return {
+            "entry_order_id": None,
+            "fill_price": fill_price,
+            "complex_order_id": None,
             "target_price": target_price,
             "stop_price": stop_price,
         }
