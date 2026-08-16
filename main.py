@@ -36,9 +36,11 @@ class TradingBot:
     def __init__(self, settings: Settings):
         self._settings = settings
         self._tz = pytz.timezone(settings.timezone)
-        self._client = TastyTradeClient(live=settings.live_trading)
         self._notifier = TelegramNotifier(
             settings.telegram_token, settings.telegram_chat_id
+        )
+        self._client = TastyTradeClient(
+            live=settings.live_trading, notify=self._notifier.send
         )
         self._strategy = BreakoutStrategy()
         self._risk = RiskManager()

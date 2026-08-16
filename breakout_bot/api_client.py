@@ -1,7 +1,7 @@
 import asyncio
 import logging
 from decimal import Decimal
-from typing import Dict, Optional
+from typing import Callable, Dict, Optional
 
 from tastytrade import Account, DXLinkStreamer, Session
 from tastytrade.dxfeed import Quote
@@ -18,6 +18,13 @@ from tastytrade.order import (
 
 logger = logging.getLogger(__name__)
 
+# Order statuses that mean an order is no longer working.
+TERMINAL_STATUSES = {"Filled", "Cancelled", "Rejected", "Expired", "Removed"}
+
+FILL_TIMEOUT_SECONDS = 60
+OCO_RETRIES = 3
+OCO_RETRY_DELAY_SECONDS = 2
+
 
 class TastyTradeClient:
     """Handles TastyTrade authentication, order placement, and quote retrieval.
@@ -25,10 +32,16 @@ class TastyTradeClient:
     When `live` is False (dry-run), no broker orders are ever placed —
     place_bracket_order simulates an immediate fill at the given signal price
     instead. This lets the bot run signal-only against real market data.
+
+    When `live` is True, entries are MARKET orders and the protective OCO
+    bracket is placed from the actual fill price, with retries. If the OCO
+    still can't be placed after all retries, the entry is immediately
+    market-closed rather than left open with no protection.
     """
 
-    def __init__(self, live: bool = False):
+    def __init__(self, live: bool = False, notify: Optional[Callable[[str], None]] = None):
         self.live = live
+        self._notify = notify or (lambda message: None)
         self.session: Optional[Session] = None
         self.account: Optional[Account] = None
         self.streamer_symbol: Optional[str] = None
@@ -102,6 +115,10 @@ class TastyTradeClient:
 
         In dry-run mode (self.live is False), places no broker orders and
         instead simulates an immediate fill at `dry_run_price`.
+
+        In live mode, if the entry fills but the protective OCO can't be
+        placed after retries, the position is immediately market-closed so
+        the bot never holds an unprotected (naked) position.
         """
         if not self.live:
             return self._simulate_bracket(buy, target_points, stop_points, dry_run_price)
@@ -127,28 +144,74 @@ class TastyTradeClient:
         )
         order_id = entry_response.order.id
 
-        fill_price = None
-        for _ in range(60):
-            current = self.account.get_order(self.session, order_id)
-            if current.status.value == "Filled":
-                fills = current.legs[0].fills
-                fill_price = sum(f.fill_price * f.quantity for f in fills) / sum(
-                    f.quantity for f in fills
+        fill_price = await self._await_fill(order_id)
+        if fill_price is None:
+            try:
+                self.account.delete_order(self.session, order_id)
+            except Exception as cancel_err:
+                logger.warning(
+                    "Failed to cancel unfilled entry %s: %s", order_id, cancel_err
                 )
-                break
-            elif current.status.value in ("Cancelled", "Rejected"):
-                return {"error": f"Entry {current.status.value}"}
-            await asyncio.sleep(1)
+            return {"error": "Entry order did not fill (cancelled or timed out)"}
 
-        if not fill_price:
-            return {"error": "Timeout waiting for fill"}
+        complex_order_id = await self._place_bracket_with_retry(
+            symbol, buy, fill_price, target_points, stop_points, order_id
+        )
+        if complex_order_id is None:
+            return {"error": "OCO placement failed after retries; position closed"}
 
         target_price = (
             fill_price + target_points if buy else fill_price - target_points
         )
         stop_price = fill_price - stop_points if buy else fill_price + stop_points
-        exit_action = OrderAction.SELL if buy else OrderAction.BUY
+        return {
+            "entry_order_id": order_id,
+            "fill_price": fill_price,
+            "complex_order_id": complex_order_id,
+            "target_price": target_price,
+            "stop_price": stop_price,
+        }
 
+    async def _await_fill(self, order_id, timeout: int = FILL_TIMEOUT_SECONDS) -> Optional[Decimal]:
+        """Polls an order until it fills or reaches a terminal/timeout state.
+
+        Returns the quantity-weighted average fill price, or None if the
+        order was cancelled/rejected or never filled within `timeout`.
+        """
+        for _ in range(timeout):
+            current = self.account.get_order(self.session, order_id)
+            status = current.status.value
+            if status == "Filled":
+                fills = current.legs[0].fills
+                return sum(f.fill_price * f.quantity for f in fills) / sum(
+                    f.quantity for f in fills
+                )
+            if status in ("Cancelled", "Rejected", "Expired"):
+                logger.warning("Order %s ended in status %s", order_id, status)
+                return None
+            await asyncio.sleep(1)
+        logger.warning("Order %s did not fill within %ds", order_id, timeout)
+        return None
+
+    async def _place_bracket_with_retry(
+        self,
+        symbol: str,
+        buy: bool,
+        fill_price: Decimal,
+        target_points: Decimal,
+        stop_points: Decimal,
+        entry_order_id,
+    ) -> Optional[str]:
+        """Places the protective OCO bracket, retrying a few times.
+
+        If every attempt fails, the position is market-closed immediately
+        (never left naked) and None is returned.
+        """
+        target_price = (
+            fill_price + target_points if buy else fill_price - target_points
+        )
+        stop_price = fill_price - stop_points if buy else fill_price + stop_points
+        exit_action = OrderAction.SELL if buy else OrderAction.BUY
         exit_leg = Leg(
             instrument_type=InstrumentType.FUTURE,
             symbol=symbol,
@@ -170,16 +233,53 @@ class TastyTradeClient:
             ),
         ]
 
-        oco_response = self.account.place_complex_order(
-            self.session, NewComplexOrder(orders=oco_orders), dry_run=False
+        last_err: Optional[Exception] = None
+        for attempt in range(1, OCO_RETRIES + 1):
+            try:
+                oco_response = self.account.place_complex_order(
+                    self.session, NewComplexOrder(orders=oco_orders), dry_run=False
+                )
+                return oco_response.complex_order.id
+            except Exception as e:
+                last_err = e
+                logger.warning(
+                    "OCO placement attempt %d/%d failed: %s", attempt, OCO_RETRIES, e
+                )
+                if attempt < OCO_RETRIES:
+                    await asyncio.sleep(OCO_RETRY_DELAY_SECONDS)
+
+        self._notify(
+            f"*OCO PLACEMENT FAILED* after {OCO_RETRIES} retries.\n"
+            f"Closing position to avoid holding it unprotected.\n"
+            f"Last error: `{str(last_err)[:160]}`"
         )
-        return {
-            "entry_order_id": order_id,
-            "fill_price": fill_price,
-            "complex_order_id": oco_response.complex_order.id,
-            "target_price": target_price,
-            "stop_price": stop_price,
-        }
+        try:
+            close_action = OrderAction.SELL if buy else OrderAction.BUY
+            close_leg = Leg(
+                instrument_type=InstrumentType.FUTURE,
+                symbol=symbol,
+                quantity=Decimal("1"),
+                action=close_action,
+            )
+            close_order = NewOrder(
+                time_in_force=OrderTimeInForce.DAY,
+                order_type=OrderType.MARKET,
+                legs=[close_leg],
+            )
+            close_response = self.account.place_order(
+                self.session, close_order, dry_run=False
+            )
+            close_fill = await self._await_fill(close_response.order.id)
+            self._notify(
+                f"Naked position CLOSED after OCO failure (market exit @ `{close_fill}`)."
+            )
+        except Exception as close_err:
+            self._notify(
+                f"*MANUAL INTERVENTION REQUIRED* - could NOT close naked position!\n"
+                f"Entry id `{entry_order_id}` ({'LONG' if buy else 'SHORT'} 1 {symbol}).\n"
+                f"Close error: `{str(close_err)[:160]}`"
+            )
+        return None
 
     @staticmethod
     def _simulate_bracket(
