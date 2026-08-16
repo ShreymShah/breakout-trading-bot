@@ -8,6 +8,7 @@ Automated futures trading bot for TastyTrade that monitors any futures contract 
 2. During the active window, it monitors 1-minute candles for closes above the high (long) or below the low (short)
 3. On breakout, it places a market entry with an OCO bracket (limit target + stop loss)
 4. Each session allows up to 2 trades, one per direction
+5. If a new breakout signal is opposite to an already-open trade, the open trade is closed first (cancelling its OCO and market-closing live, or logged with PnL in dry-run) before the new trade is opened — the bot never holds two opposing positions on the same underlying at once
 
 By default the bot runs in **dry-run mode**: signals are detected against live market data and simulated as if filled at the breakout price, but no broker orders are ever placed. Set `LIVE_TRADING=1` to place real orders.
 

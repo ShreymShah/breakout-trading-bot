@@ -186,6 +186,55 @@ class TradingBot:
         if trades_to_remove:
             self._state_mgr.save(self._state)
 
+    async def _close_opposite_trades(
+        self, opposing: list, exit_price: Decimal
+    ) -> bool:
+        """Closes active trades that conflict with a new opposite-direction
+        signal, so the bot never holds two opposing positions on the same
+        underlying at once.
+
+        Returns True if it's safe to proceed with the new entry, False if a
+        live close couldn't be confirmed (new entry must be aborted so it
+        doesn't compound an unresolved position).
+        """
+        for trade in opposing:
+            if self._settings.live_trading:
+                result = await self._client.close_position(
+                    symbol=self._settings.symbol_base,
+                    was_buy=(trade.side == "LONG"),
+                    complex_order_id=trade.complex_order_id,
+                )
+                if "error" in result:
+                    self._notifier.send(
+                        f"*OPPOSITE CLOSE FAILED* - {trade.sess_name} {trade.side}\n"
+                        f"`{result['error']}`\n"
+                        f"New entry aborted; verify the position in the broker UI."
+                    )
+                    logger.error(
+                        "Opposite close failed for %s %s: %s",
+                        trade.sess_name, trade.side, result["error"],
+                    )
+                    return False
+                close_price = result["fill_price"]
+            else:
+                close_price = exit_price
+
+            pnl = (
+                close_price - trade.entry_price
+                if trade.side == "LONG"
+                else trade.entry_price - close_price
+            )
+            pnl_emoji = "✅" if pnl > 0 else "❌" if pnl < 0 else "➖"
+            self._notifier.send(
+                f"*OPPOSITE CLOSE* - {trade.sess_name} {trade.side}\n"
+                f"Entry: `{trade.entry_price}` -> Exit: `{close_price}` "
+                f"{pnl_emoji} PnL: `{pnl:+.2f}`"
+            )
+            self._state.active_trades.remove(trade)
+
+        self._state_mgr.save(self._state)
+        return True
+
     async def _process_entries(
         self, c_close: Decimal, now_la: datetime, curr_h: int
     ) -> bool:
@@ -215,6 +264,14 @@ class TradingBot:
 
             if not self._risk.can_take_direction(
                 s_id, signal.side, self._state.trades_taken
+            ):
+                continue
+
+            opposing = [
+                t for t in self._state.active_trades if t.side != signal.side
+            ]
+            if opposing and not await self._close_opposite_trades(
+                opposing, signal.price
             ):
                 continue
 
@@ -251,6 +308,7 @@ class TradingBot:
                 cutoff_h=cfg.end_hour,
                 sess_id=s_id,
                 entry_price=trade_result.get("fill_price"),
+                complex_order_id=trade_result.get("complex_order_id"),
             )
 
             self._state.active_trades.append(new_trade)

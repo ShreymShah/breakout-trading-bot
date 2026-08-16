@@ -18,6 +18,7 @@ class ActiveTrade:
     cutoff_h: int
     sess_id: int
     entry_price: Decimal
+    complex_order_id: Optional[str] = None
 
 
 @dataclass
@@ -63,6 +64,7 @@ class StateManager:
                         "cutoff_h": t.cutoff_h,
                         "sess_id": t.sess_id,
                         "entry_price": str(t.entry_price),
+                        "complex_order_id": t.complex_order_id,
                     }
                     for t in state.active_trades
                 ],
@@ -117,6 +119,7 @@ class StateManager:
                         cutoff_h=t["cutoff_h"],
                         sess_id=t["sess_id"],
                         entry_price=Decimal(t["entry_price"]),
+                        complex_order_id=t.get("complex_order_id"),
                     )
                 )
 

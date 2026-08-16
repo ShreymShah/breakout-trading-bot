@@ -281,6 +281,87 @@ class TastyTradeClient:
             )
         return None
 
+    async def close_position(
+        self, symbol: str, was_buy: bool, complex_order_id: Optional[str]
+    ) -> Dict:
+        """Closes a live position ahead of an opposite-direction entry.
+
+        Cancels the protective OCO (if any) and market-closes. Checks for a
+        same-side fill both before and after the cancel, since the OCO's
+        target/stop leg may have filled in the race window right as we
+        decide to close — in that case we report the fill instead of
+        market-closing into a fresh, unprotected opposite position.
+
+        Only valid in live mode. Returns {"fill_price": ...} on success (with
+        "already_closed": True if the OCO beat us to it), or {"error": ...}.
+        """
+        if not self.live:
+            return {"error": "close_position called in dry-run mode"}
+
+        if complex_order_id:
+            already = await self._oco_fill_price(complex_order_id)
+            if already is not None:
+                return {"fill_price": already, "already_closed": True}
+            try:
+                self.account.delete_complex_order(self.session, complex_order_id)
+            except Exception as e:
+                logger.warning(
+                    "OCO %s cancel failed (may already be terminal): %s",
+                    complex_order_id, e,
+                )
+            already = await self._oco_fill_price(complex_order_id)
+            if already is not None:
+                return {"fill_price": already, "already_closed": True}
+
+        close_action = OrderAction.SELL if was_buy else OrderAction.BUY
+        close_leg = Leg(
+            instrument_type=InstrumentType.FUTURE,
+            symbol=symbol,
+            quantity=Decimal("1"),
+            action=close_action,
+        )
+        close_order = NewOrder(
+            time_in_force=OrderTimeInForce.DAY,
+            order_type=OrderType.MARKET,
+            legs=[close_leg],
+        )
+        try:
+            close_response = self.account.place_order(
+                self.session, close_order, dry_run=False
+            )
+        except Exception as e:
+            return {"error": f"Market close order failed: {e}"}
+
+        fill_price = await self._await_fill(close_response.order.id)
+        if fill_price is None:
+            return {"error": "Market close order did not fill"}
+        return {"fill_price": fill_price}
+
+    async def _oco_fill_price(self, complex_order_id: str) -> Optional[Decimal]:
+        """If a leg of this OCO has already filled, returns its fill price."""
+        try:
+            orders = self.account.get_live_orders(self.session)
+        except Exception as e:
+            logger.warning("get_live_orders failed: %s", e)
+            return None
+        target = str(complex_order_id)
+        for o in orders:
+            if str(getattr(o, "complex_order_id", None)) != target:
+                continue
+            try:
+                if o.status.value != "Filled":
+                    continue
+                fills = o.legs[0].fills
+            except Exception:
+                continue
+            if not fills:
+                continue
+            total_qty = sum(f.quantity for f in fills)
+            if total_qty == 0:
+                continue
+            return sum(f.fill_price * f.quantity for f in fills) / total_qty
+        return None
+
     @staticmethod
     def _simulate_bracket(
         buy: bool,
