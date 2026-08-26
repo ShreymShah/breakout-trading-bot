@@ -245,6 +245,10 @@ class TradingBot:
                 continue
 
             in_active_window = True
+
+            if self._client.auth_halted:
+                continue
+
             eligible_time = self._state.session_trade_eligible_time.get(s_id)
 
             if not self._risk.is_trade_eligible(
@@ -399,9 +403,10 @@ class TradingBot:
                         now_utc = datetime.now()
                         if (now_utc - last_log_time).total_seconds() > 300:
                             logger.info(
-                                "Alive - %d candles | Connection #%d",
+                                "Alive - %d candles | Connection #%d | auth=%s",
                                 candle_count,
                                 self._state.reconnect_count,
+                                "HALTED" if self._client.auth_halted else "ok",
                             )
                             last_log_time = now_utc
 
@@ -427,6 +432,11 @@ class TradingBot:
                             continue
 
                         c_close = Decimal(str(candle.close))
+
+                        try:
+                            await self._client.maybe_refresh_token()
+                        except Exception as e:
+                            logger.warning("Token refresh check error: %s", e)
 
                         await self._process_exits(c_close, curr_h)
                         in_active_window = await self._process_entries(

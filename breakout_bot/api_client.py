@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import time
 from decimal import Decimal
 from typing import Callable, Dict, Optional
 
@@ -25,6 +26,13 @@ FILL_TIMEOUT_SECONDS = 60
 OCO_RETRIES = 3
 OCO_RETRY_DELAY_SECONDS = 2
 
+# OAuth access tokens last ~15 min; refresh on a shorter cadence so a call
+# never hits an expired token.
+TOKEN_REFRESH_SECONDS = 600
+# Consecutive refresh failures before halting new entries and alerting once.
+AUTH_FAIL_THRESHOLD = 3
+AUTH_BACKOFF_CAP_SECONDS = 300
+
 
 class TastyTradeClient:
     """Handles TastyTrade authentication, order placement, and quote retrieval.
@@ -45,6 +53,10 @@ class TastyTradeClient:
         self.session: Optional[Session] = None
         self.account: Optional[Account] = None
         self.streamer_symbol: Optional[str] = None
+        # Token-refresh + auth circuit-breaker state.
+        self.auth_halted = False
+        self._next_token_refresh = 0.0
+        self._auth_failures = 0
 
     async def login(self, username: str, password: str, symbol_base: str) -> None:
         max_retries = 3
@@ -65,6 +77,11 @@ class TastyTradeClient:
                     logger.warning(
                         "Account fetch failed (dry-run, continuing): %s", acct_err
                     )
+                # Session() just performed an initial auth; schedule the next
+                # proactive refresh and clear any prior auth-failure state.
+                self._next_token_refresh = time.monotonic() + TOKEN_REFRESH_SECONDS
+                self._auth_failures = 0
+                self.auth_halted = False
                 logger.info(
                     "Login successful - %s (mode=%s)",
                     self.streamer_symbol,
@@ -79,6 +96,49 @@ class TastyTradeClient:
                     await asyncio.sleep(5)
                 else:
                     raise
+
+    async def maybe_refresh_token(self, force: bool = False) -> None:
+        """Proactively refreshes the OAuth access token before it expires.
+
+        Gated by an internal timer, so it's cheap to call on every candle.
+        On repeated refresh failure (e.g. a revoked refresh token), trips an
+        auth circuit-breaker (`self.auth_halted`) so the caller can pause new
+        entries; auto-resumes and alerts once refresh succeeds again.
+        """
+        if not self.session:
+            return
+        now = time.monotonic()
+        if not force and now < self._next_token_refresh:
+            return
+        try:
+            await asyncio.to_thread(self.session.refresh)
+            self._next_token_refresh = now + TOKEN_REFRESH_SECONDS
+            if self.auth_halted:
+                self.auth_halted = False
+                self._notify("*Auth recovered* - token refreshed, trading resumed.")
+                logger.info("Auth recovered - token refresh succeeded, trading resumed")
+            elif self._auth_failures:
+                logger.info("Token refresh recovered after %d failure(s)", self._auth_failures)
+            self._auth_failures = 0
+        except Exception as e:
+            self._auth_failures += 1
+            backoff = min(30 * (2 ** (self._auth_failures - 1)), AUTH_BACKOFF_CAP_SECONDS)
+            self._next_token_refresh = now + backoff
+            logger.warning(
+                "Token refresh failed #%d: %s (retry in %ds)",
+                self._auth_failures, e, backoff,
+            )
+            if self._auth_failures >= AUTH_FAIL_THRESHOLD and not self.auth_halted:
+                self.auth_halted = True
+                self._notify(
+                    f"*AUTH HALTED* - token refresh failing "
+                    f"({self._auth_failures}x). New entries paused; "
+                    f"auto-resumes once it recovers.\nLast error: `{str(e)[:160]}`"
+                )
+                logger.error(
+                    "Auth circuit breaker tripped after %d consecutive failures",
+                    self._auth_failures,
+                )
 
     def validate_session(self) -> bool:
         try:
