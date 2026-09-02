@@ -48,6 +48,7 @@ class TradingBot:
         self._state = self._state_mgr.load(
             list(settings.sessions.keys()), self._tz
         )
+        self._reconciled = False
 
     def _reset_daily_state(self) -> None:
         session_ids = list(self._settings.sessions.keys())
@@ -235,6 +236,68 @@ class TradingBot:
         self._state_mgr.save(self._state)
         return True
 
+    async def _reconcile_on_startup(self) -> None:
+        """After a (re)start, cross-checks any restored trades against the
+        broker so a crash or redeploy can't silently diverge from reality.
+
+        Runs at most once per process (guarded by self._reconciled), only in
+        live mode, and only when there are trades restored from disk.
+        """
+        if self._reconciled:
+            return
+        self._reconciled = True
+
+        if not self._settings.live_trading or not self._state.active_trades:
+            return
+
+        logger.info(
+            "Reconciling %d restored trade(s) with broker...",
+            len(self._state.active_trades),
+        )
+        orders = await self._client.fetch_live_orders()
+
+        survivors = []
+        for trade in self._state.active_trades:
+            status, price = self._client.oco_status(orders, trade.complex_order_id)
+
+            if status == "FILLED":
+                pnl = (
+                    price - trade.entry_price
+                    if trade.side == "LONG"
+                    else trade.entry_price - price
+                )
+                pnl_emoji = "✅" if pnl > 0 else "❌" if pnl < 0 else "➖"
+                self._notifier.send(
+                    f"*RECONCILE: FILLED WHILE DOWN* - {trade.sess_name} {trade.side}\n"
+                    f"Entry: `{trade.entry_price}` -> Exit: `{price}` "
+                    f"{pnl_emoji} PnL: `{pnl:+.2f}`",
+                    force=True,
+                )
+                continue
+
+            if status == "WORKING":
+                survivors.append(trade)
+                self._notifier.send(
+                    f"*RESTORED & PROTECTED* - {trade.sess_name} {trade.side} @ "
+                    f"`{trade.entry_price}` (OCO live, TP `{trade.tp}` SL `{trade.sl}`)"
+                )
+                continue
+
+            # UNKNOWN: no OCO id on record, or it wasn't found in the
+            # live-orders snapshot. Don't guess either way - keep tracking
+            # and ask for a manual check rather than risk dropping a real
+            # position or closing into a fresh unprotected one.
+            survivors.append(trade)
+            self._notifier.send(
+                f"*RECONCILE* - {trade.sess_name} {trade.side}: OCO "
+                f"`{trade.complex_order_id}` not confirmed. "
+                f"Verify position/protection in the broker UI.",
+                force=True,
+            )
+
+        self._state.active_trades = survivors
+        self._state_mgr.save(self._state)
+
     async def _process_entries(
         self, c_close: Decimal, now_la: datetime, curr_h: int
     ) -> bool:
@@ -370,6 +433,7 @@ class TradingBot:
             self._settings.tt_password,
             self._settings.symbol_base,
         )
+        await self._reconcile_on_startup()
 
         self._state.reconnect_count += 1
         logger.info(

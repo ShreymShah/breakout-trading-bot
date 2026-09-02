@@ -359,9 +359,10 @@ class TastyTradeClient:
             return {"error": "close_position called in dry-run mode"}
 
         if complex_order_id:
-            already = await self._oco_fill_price(complex_order_id)
-            if already is not None:
-                return {"fill_price": already, "already_closed": True}
+            orders = await self.fetch_live_orders()
+            status, price = self.oco_status(orders, complex_order_id)
+            if status == "FILLED":
+                return {"fill_price": price, "already_closed": True}
             try:
                 self.account.delete_complex_order(self.session, complex_order_id)
             except Exception as e:
@@ -369,9 +370,10 @@ class TastyTradeClient:
                     "OCO %s cancel failed (may already be terminal): %s",
                     complex_order_id, e,
                 )
-            already = await self._oco_fill_price(complex_order_id)
-            if already is not None:
-                return {"fill_price": already, "already_closed": True}
+            orders = await self.fetch_live_orders()
+            status, price = self.oco_status(orders, complex_order_id)
+            if status == "FILLED":
+                return {"fill_price": price, "already_closed": True}
 
         close_action = OrderAction.SELL if was_buy else OrderAction.BUY
         close_leg = Leg(
@@ -397,30 +399,58 @@ class TastyTradeClient:
             return {"error": "Market close order did not fill"}
         return {"fill_price": fill_price}
 
-    async def _oco_fill_price(self, complex_order_id: str) -> Optional[Decimal]:
-        """If a leg of this OCO has already filled, returns its fill price."""
+    async def fetch_live_orders(self) -> list:
+        """Live + recently-terminal orders, or [] on failure / dry-run.
+
+        Used both to detect a race-condition fill in close_position() and to
+        reconcile restored trades against the broker on startup.
+        """
+        if not self.live or self.account is None:
+            return []
         try:
-            orders = self.account.get_live_orders(self.session)
+            return self.account.get_live_orders(self.session)
         except Exception as e:
             logger.warning("get_live_orders failed: %s", e)
-            return None
+            return []
+
+    @staticmethod
+    def oco_status(orders: list, complex_order_id: Optional[str]):
+        """Classifies a bracket's state from a fetch_live_orders() snapshot.
+
+        Returns ("FILLED", price) if a leg has filled, ("WORKING", None) if
+        the bracket is still live but unfilled, or ("UNKNOWN", None) if it
+        has no id or wasn't found in the snapshot (e.g. aged out of the
+        broker's live-orders window) — callers should not assume either
+        filled or working in that case.
+        """
+        if not complex_order_id:
+            return ("UNKNOWN", None)
         target = str(complex_order_id)
+        has_working = False
         for o in orders:
             if str(getattr(o, "complex_order_id", None)) != target:
                 continue
             try:
-                if o.status.value != "Filled":
-                    continue
-                fills = o.legs[0].fills
+                status = o.status.value
             except Exception:
                 continue
-            if not fills:
-                continue
-            total_qty = sum(f.quantity for f in fills)
-            if total_qty == 0:
-                continue
-            return sum(f.fill_price * f.quantity for f in fills) / total_qty
-        return None
+            if status == "Filled":
+                try:
+                    fills = o.legs[0].fills
+                except Exception:
+                    fills = None
+                if fills:
+                    total_qty = sum(f.quantity for f in fills)
+                    if total_qty:
+                        price = (
+                            sum(f.fill_price * f.quantity for f in fills) / total_qty
+                        )
+                        return ("FILLED", price)
+            elif status not in TERMINAL_STATUSES:
+                has_working = True
+        if has_working:
+            return ("WORKING", None)
+        return ("UNKNOWN", None)
 
     @staticmethod
     def _simulate_bracket(
